@@ -15,6 +15,23 @@
 
 #define CHUNK 16384
 
+namespace
+{
+thread_local libcdr::StopCheck g_stopCheck = nullptr;
+thread_local void *g_stopContext = nullptr;
+}
+
+void libcdr::setStopCheck(StopCheck check, void *context)
+{
+  g_stopCheck = check;
+  g_stopContext = context;
+}
+
+bool libcdr::stopRequested()
+{
+  return g_stopCheck && g_stopCheck(g_stopContext);
+}
+
 libcdr::CDRInternalStream::CDRInternalStream(const std::vector<unsigned char> &buffer) :
   librevenge::RVNGInputStream(),
   m_offset(0),
@@ -71,6 +88,12 @@ libcdr::CDRInternalStream::CDRInternalStream(librevenge::RVNGInputStream *input,
 
     do
     {
+      if (stopRequested())
+      {
+        (void)inflateEnd(&strm);
+        m_buffer.clear();
+        return;
+      }
       strm.avail_out = CHUNK;
       strm.next_out = out;
       ret = inflate(&strm, Z_NO_FLUSH);
@@ -101,7 +124,7 @@ const unsigned char *libcdr::CDRInternalStream::read(unsigned long numBytes, uns
 {
   numBytesRead = 0;
 
-  if (numBytes == 0)
+  if (numBytes == 0 || stopRequested())
     return nullptr;
 
   if (m_offset < 0)
@@ -153,6 +176,8 @@ long libcdr::CDRInternalStream::tell()
 
 bool libcdr::CDRInternalStream::isEnd()
 {
+  if (stopRequested())
+    return true;
   if ((long)m_offset >= (long)m_buffer.size())
     return true;
 

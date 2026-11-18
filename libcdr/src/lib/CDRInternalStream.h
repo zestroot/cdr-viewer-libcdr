@@ -17,6 +17,13 @@
 namespace libcdr
 {
 
+// cdr-core: a stop check for the in-memory streams libcdr parses from (it copies every list of
+// records into one). While it returns true, reads find the end of the stream and unpacking
+// stops, so the parse winds down. Set per thread; null turns it off.
+typedef bool (*StopCheck)(void *context);
+void setStopCheck(StopCheck check, void *context);
+bool stopRequested();
+
 class CDRInternalStream : public librevenge::RVNGInputStream
 {
 public:
