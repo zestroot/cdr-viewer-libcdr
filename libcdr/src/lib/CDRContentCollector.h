@@ -29,6 +29,13 @@
 namespace libcdr
 {
 
+// cdr-core: pictures read in place. libcdr gives each picture it puts in a property list
+// (office:binary-data, draw:fill-image) a key there (libcdr:picture, libcdr:fill-picture), on
+// this thread; a key always names the same picture until clearPictures.
+bool pictureData(int key, const unsigned char *&data, unsigned long &size);   // false: none
+void releasePicture(int key);   // done with it (the property lists still hold theirs)
+void clearPictures();   // this thread's, after a parse
+
 class CDRContentCollector : public CDRCollector
 {
 public:

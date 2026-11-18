@@ -69,6 +69,23 @@ bool frameShift(const libcdr::CDRPage &from, const libcdr::CDRPage &to, libreven
   return true;
 }
 
+// cdr-core: the pictures put in property lists on this thread, by key (see pictureData). Each is
+// a handle on the property list's own data: shared, not copied.
+thread_local std::vector<librevenge::RVNGBinaryData> g_pictures;
+
+// A picture put in a property list as name, with its key in the table as keyName. librevenge
+// hands a picture out only as base64 (getStr), which copies and encodes all of it, slowly, each
+// time it is drawn; a painter that knows the key reads its data in place.
+void insertPicture(librevenge::RVNGPropertyList &propList, const char *name, const char *keyName, const librevenge::RVNGBinaryData &data)
+{
+  propList.insert(name, data);
+  if (!data.empty() && g_pictures.size() < 0x7fffffffUL)
+  {
+    g_pictures.push_back(data);
+    propList.insert(keyName, (int)g_pictures.size());
+  }
+}
+
 // An arrowhead's outline as SVG path data in its own units, as its arrw record gives it (libcdr's
 // own libcdr:marker-start / -end: draw:marker-*-path is transformed for ODF's drawing of markers)
 librevenge::RVNGString markerPath(const libcdr::CDRPath &marker)
@@ -214,6 +231,27 @@ librevenge::RVNGBinaryData tileSVG(const librevenge::RVNGBinaryData &svg, const 
 }
 
 }
+}
+
+bool libcdr::pictureData(int key, const unsigned char *&data, unsigned long &size)
+{
+  if (key < 1 || (unsigned long)key > g_pictures.size())
+    return false;
+  const librevenge::RVNGBinaryData &picture = g_pictures[key - 1];
+  data = picture.getDataBuffer();
+  size = picture.size();
+  return data && size;
+}
+
+void libcdr::releasePicture(int key)
+{
+  if (key >= 1 && (unsigned long)key <= g_pictures.size())
+    g_pictures[key - 1] = librevenge::RVNGBinaryData();
+}
+
+void libcdr::clearPictures()
+{
+  std::vector<librevenge::RVNGBinaryData>().swap(g_pictures);
 }
 
 libcdr::CDRContentCollector::CDRContentCollector(libcdr::CDRParserState &ps, librevenge::RVNGDrawingInterface *painter,
@@ -791,7 +829,7 @@ void libcdr::CDRContentCollector::_flushCurrentPath()
       mimeType = "image/gif";
     propList.insert("librevenge:mime-type", mimeType);
     const librevenge::RVNGBinaryData image = m_currentImageMono ? _monoImage(imageData) : imageData;
-    propList.insert("office:binary-data", image);
+    insertPicture(propList, "office:binary-data", "libcdr:picture", image);
     // the bitmap's own outline (a bitmap cropped with the Shape tool, or a pattern tile of an
     // imported PDF): it shows only inside it (libcdr's own: librevenge has no clip for images)
     if (imageClip.count())
@@ -1409,7 +1447,7 @@ void libcdr::CDRContentCollector::_fillProperties(librevenge::RVNGPropertyList &
             fclose(f);
           }
 #endif
-          propList.insert("draw:fill-image", image);
+          insertPicture(propList, "draw:fill-image", "libcdr:fill-picture", image);
           propList.insert("librevenge:mime-type", "image/bmp");
           propList.insert("style:repeat", "repeat");
           if (m_currentFillStyle.imageFill.isRelative)
@@ -1469,7 +1507,7 @@ void libcdr::CDRContentCollector::_fillProperties(librevenge::RVNGPropertyList &
         {
           propList.insert("librevenge:mime-type", "image/bmp");
           propList.insert("draw:fill", "bitmap");
-          propList.insert("draw:fill-image", iterBmp->second);
+          insertPicture(propList, "draw:fill-image", "libcdr:fill-picture", iterBmp->second);
           propList.insert("style:repeat", "repeat");
           if (m_currentFillStyle.imageFill.isRelative)
           {
@@ -1532,9 +1570,9 @@ void libcdr::CDRContentCollector::_fillProperties(librevenge::RVNGPropertyList &
           const CDRBox &tile = m_currentFillStyle.imageFill.tile;
           auto iterBox = m_ps.m_vectBoxes.find(m_currentFillStyle.imageFill.id);
           if (tile.getWidth() > 0 && tile.getHeight() > 0 && iterBox != m_ps.m_vectBoxes.end())
-            propList.insert("draw:fill-image", tileSVG(iterVect->second, iterBox->second, tile));
+            insertPicture(propList, "draw:fill-image", "libcdr:fill-picture", tileSVG(iterVect->second, iterBox->second, tile));
           else
-            propList.insert("draw:fill-image", iterVect->second);
+            insertPicture(propList, "draw:fill-image", "libcdr:fill-picture", iterVect->second);
           propList.insert("style:repeat", "repeat");
           if (m_currentFillStyle.imageFill.isRelative)
           {
