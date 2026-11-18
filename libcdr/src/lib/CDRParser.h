@@ -115,6 +115,7 @@ private:
   unsigned m_layerLevel;
   bool m_layerFlagsPending;
   bool m_skipLayer;
+  bool m_layerIdPending;   // the layer's own loda, with its id, not read yet
   unsigned m_textCount4;   // CorelDRAW 4 texts read: their ids (the same in both passes)
   double m_oleX1, m_oleX2, m_oleY1, m_oleY2;   // the embedded (OLE) object being read: its box
   // X6 text styles, parsed once: big plans repeat the same JSON style strings thousands of times

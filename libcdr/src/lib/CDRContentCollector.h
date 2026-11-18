@@ -16,6 +16,7 @@
 #include <vector>
 #include <stack>
 #include <queue>
+#include <string>
 
 #include <librevenge/librevenge.h>
 
@@ -71,6 +72,8 @@ public:
   void collectParagraphText(double x, double y, double width, double height) override;
   void collectStld(unsigned, const CDRStyle &) override {}
   void collectStyleId(unsigned styleId) override;
+  void collectLayer(const std::string &id) override;
+  void collectLayerEnd(unsigned level) override;
 
 private:
   CDRContentCollector(const CDRContentCollector &);
@@ -146,6 +149,18 @@ private:
   CDRSplineData m_splineData;
   double m_fillOpacity;
   bool m_reverseOrder;
+
+  // master layers (CorelDRAW X6+): their content in drawing order, by layer id, and the ids in
+  // the master page's order. Each page lists the master layers it shows among its own layers,
+  // which places them in its stacking order (a background under the page's objects).
+  std::map<std::string, std::vector<CDROutputElementList>> m_masterLayers;
+  std::vector<std::string> m_masterLayerOrder;
+  std::string m_masterLayerId;   // the master layer being read
+  std::stack<CDROutputElementList> m_masterOutputElementsStack;
+  std::queue<CDROutputElementList> m_masterOutputElementsQueue;
+  bool m_pageHasMasterLayers;   // the page listed master layers
+  // output elements drawn again (master layers on each page): capped against crafted files
+  unsigned long m_copiedElements;
 
   CDRParserState &m_ps;
 };

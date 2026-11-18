@@ -12,6 +12,7 @@
 
 #include <map>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -107,6 +108,11 @@ public:
   virtual void collectParagraphText(double x, double y, double width, double height) = 0;
   virtual void collectStld(unsigned id, const CDRStyle &style) = 0;
   virtual void collectStyleId(unsigned id) = 0;
+  // a layer's id (CorelDRAW X6+). On the master page, the master layer read next; on a page, a
+  // master layer shown there, at that place in the page's stacking order
+  virtual void collectLayer(const std::string & /* id */) {}
+  // the end of the layer whose list was at that level
+  virtual void collectLayerEnd(unsigned /* level */) {}
 };
 
 } // namespace libcdr

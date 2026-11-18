@@ -41,6 +41,10 @@ namespace libcdr
 namespace
 {
 
+// The most output elements drawn again (master layers repeated on each page): a crafted file
+// could otherwise repeat a big layer on thousands of pages
+const unsigned long MAX_COPIED_ELEMENTS = 300000;
+
 // An arrowhead's outline as SVG path data in its own units, as its arrw record gives it (libcdr's
 // own libcdr:marker-start / -end: draw:marker-*-path is transformed for ODF's drawing of markers)
 librevenge::RVNGString markerPath(const libcdr::CDRPath &marker)
@@ -198,6 +202,8 @@ libcdr::CDRContentCollector::CDRContentCollector(libcdr::CDRParserState &ps, lib
     m_outputElementsStack(nullptr), m_contentOutputElementsStack(), m_fillOutputElementsStack(),
     m_outputElementsQueue(nullptr), m_contentOutputElementsQueue(), m_fillOutputElementsQueue(),
     m_groupLevels(), m_groupTransforms(), m_writtenStartMarker(), m_writtenEndMarker(), m_markerPaths(), m_splineData(), m_fillOpacity(1.0), m_reverseOrder(reverseOrder),
+    m_masterLayers(), m_masterLayerOrder(), m_masterLayerId(), m_masterOutputElementsStack(),
+    m_masterOutputElementsQueue(), m_pageHasMasterLayers(false), m_copiedElements(0),
     m_ps(ps)
 {
   m_outputElementsStack = &m_contentOutputElementsStack;
@@ -261,15 +267,89 @@ void libcdr::CDRContentCollector::_endPage()
     m_contentOutputElementsQueue.front().draw(m_painter);
     m_contentOutputElementsQueue.pop();
   }
+  // master layers on a page that does not list them (no such list in the file): over the page's
+  // objects, where libcdr drew the master page's objects before
+  if (!m_pageHasMasterLayers)
+  {
+    for (auto it = m_masterLayerOrder.rbegin(); it != m_masterLayerOrder.rend(); ++it)
+    {
+      const std::vector<CDROutputElementList> &elements = m_masterLayers[*it];
+      if (m_copiedElements + elements.size() > MAX_COPIED_ELEMENTS)
+        break;
+      m_copiedElements += elements.size();
+      for (const auto &element : elements)
+        element.draw(m_painter);
+    }
+  }
   if (m_painter)
     m_painter->endPage();
   m_isPageStarted = false;
+}
+
+void libcdr::CDRContentCollector::collectLayer(const std::string &id)
+{
+  if (id.empty() || m_currentVectLevel || !m_masterLayerId.empty())
+    return;
+  if (m_ignorePage)
+  {
+    // a master layer: its objects are kept for the pages that list it (see collectLayerEnd)
+    m_masterLayerId = id;
+    m_outputElementsStack = &m_masterOutputElementsStack;
+    m_outputElementsQueue = &m_masterOutputElementsQueue;
+    return;
+  }
+  // a page's layer: a master layer when it has one's id, drawn here in the page's stacking order
+  auto iter = m_masterLayers.find(id);
+  if (iter == m_masterLayers.end())
+    return;
+  m_pageHasMasterLayers = true;
+  const std::vector<CDROutputElementList> &elements = iter->second;
+  if (elements.empty() || m_copiedElements + elements.size() > MAX_COPIED_ELEMENTS)
+    return;
+  m_copiedElements += elements.size();
+  if (!m_isPageStarted && !m_ignorePage)
+    _startPage(m_page.width, m_page.height);
+  if (m_reverseOrder)   // (the stack is drawn from its top)
+  {
+    for (auto it = elements.rbegin(); it != elements.rend(); ++it)
+      m_outputElementsStack->push(*it);
+  }
+  else
+  {
+    for (const auto &element : elements)
+      m_outputElementsQueue->push(element);
+  }
+}
+
+void libcdr::CDRContentCollector::collectLayerEnd(unsigned level)
+{
+  if (m_masterLayerId.empty())
+    return;
+  collectLevel(level + 1);   // (the layer's last object and its groups)
+  if (!m_masterLayers.count(m_masterLayerId))
+    m_masterLayerOrder.push_back(m_masterLayerId);
+  std::vector<CDROutputElementList> &elements = m_masterLayers[m_masterLayerId];
+  elements.clear();   // (in drawing order)
+  while (!m_masterOutputElementsStack.empty())
+  {
+    elements.push_back(m_masterOutputElementsStack.top());
+    m_masterOutputElementsStack.pop();
+  }
+  while (!m_masterOutputElementsQueue.empty())
+  {
+    elements.push_back(m_masterOutputElementsQueue.front());
+    m_masterOutputElementsQueue.pop();
+  }
+  m_masterLayerId.clear();
+  m_outputElementsStack = &m_contentOutputElementsStack;
+  m_outputElementsQueue = &m_contentOutputElementsQueue;
 }
 
 void libcdr::CDRContentCollector::collectPage(unsigned level)
 {
   m_isPageProperties = true;
   m_ignorePage = false;
+  m_pageHasMasterLayers = false;
   m_currentPageLevel = level;
   m_page = m_ps.m_pages[m_pageIndex++];
 

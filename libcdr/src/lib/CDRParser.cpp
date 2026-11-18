@@ -297,7 +297,7 @@ void readFittedPlaces(librevenge::RVNGInputStream *input, std::vector<unsigned c
 libcdr::CDRParser::CDRParser(const std::vector<std::unique_ptr<librevenge::RVNGInputStream>> &externalStreams, libcdr::CDRCollector *collector)
   : CommonParser(collector), m_externalStreams(externalStreams),
     m_fonts(), m_fillStyles(), m_lineStyles(), m_arrows(), m_version(0), m_waldoOutlId(0), m_waldoFillId(0),
-    m_layerLevel(0), m_layerFlagsPending(false), m_skipLayer(false), m_textCount4(0),
+    m_layerLevel(0), m_layerFlagsPending(false), m_skipLayer(false), m_layerIdPending(false), m_textCount4(0),
     m_oleX1(0.0), m_oleX2(0.0), m_oleY1(0.0), m_oleY2(0.0), m_x6Styles() {}
 
 libcdr::CDRParser::~CDRParser()
@@ -716,11 +716,13 @@ bool libcdr::CDRParser::parseRecord(librevenge::RVNGInputStream *input, const st
         m_layerLevel = level;
         m_layerFlagsPending = true;
         m_skipLayer = false;
+        m_layerIdPending = true;
       }
       else if (listType == CDR_FOURCC_page)
         m_collector->collectPage(level);
       else if (listType == CDR_FOURCC_obj)
       {
+        m_layerIdPending = false;
         if (m_skipLayer && level > m_layerLevel)
         {
           input->seek(position + length, librevenge::RVNG_SEEK_SET);
@@ -760,6 +762,11 @@ bool libcdr::CDRParser::parseRecord(librevenge::RVNGInputStream *input, const st
           tmpBlockLengths.push_back(readU32(&tmpBlocksStream));
         if (!parseRecords(&tmpStream, tmpBlockLengths, level+1))
           return false;
+      }
+      if (listType == CDR_FOURCC_layr)
+      {
+        m_layerIdPending = false;
+        m_collector->collectLayerEnd(level);
       }
     }
     else
@@ -1962,6 +1969,16 @@ void libcdr::CDRParser::readLoda(librevenge::RVNGInputStream *input, unsigned le
     }
     else if (argTypes[i] == 0x4aba)
       readPageSize(input);
+    else if (argTypes[i] == 0x9c72 && m_layerIdPending)
+    {
+      // the layer's id (CorelDRAW X6+, 16 bytes): a page lists the master layers it shows, in its
+      // stacking order, by their ids
+      m_layerIdPending = false;
+      unsigned long numBytesRead = 0;
+      const unsigned char *id = input->read(16, numBytesRead);
+      if (id && numBytesRead == 16)
+        m_collector->collectLayer(std::string(reinterpret_cast<const char *>(id), 16));
+    }
   }
   input->seek(startPosition+chunkLength, librevenge::RVNG_SEEK_SET);
 }
