@@ -39,9 +39,15 @@ public:
   void addEndTextObject();
   void addStartGroup(const librevenge::RVNGPropertyList &propList);
   void addEndGroup();
+  // another list's elements after these (shared, not copied)
+  void append(const CDROutputElementList &other);
   bool empty() const
   {
     return m_elements.empty();
+  }
+  size_t size() const
+  {
+    return m_elements.size();
   }
 private:
   std::vector<std::shared_ptr<CDROutputElement>> m_elements;

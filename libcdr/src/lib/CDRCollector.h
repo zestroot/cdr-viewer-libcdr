@@ -113,6 +113,13 @@ public:
   virtual void collectLayer(const std::string & /* id */) {}
   // the end of the layer whose list was at that level
   virtual void collectLayerEnd(unsigned /* level */) {}
+  // the PowerClips' contents (CorelDRAW X6+): a group for each, by its id, before the pages
+  virtual void collectClipList(unsigned level)
+  {
+    collectVect(level);
+  }
+  // the current object is a PowerClip showing the contents with this id
+  virtual void collectPowerClip(unsigned /* id */) {}
 };
 
 } // namespace libcdr

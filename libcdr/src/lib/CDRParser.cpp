@@ -740,6 +740,8 @@ bool libcdr::CDRParser::parseRecord(librevenge::RVNGInputStream *input, const st
         else
           m_precision = libcdr::PRECISION_32BIT;
       }
+      else if (listType == CDR_FOURCC_clpt && m_version >= 1600)
+        m_collector->collectClipList(level);
       else if (listType == CDR_FOURCC_vect || listType == CDR_FOURCC_clpt)
         m_collector->collectVect(level);
 
@@ -1969,6 +1971,13 @@ void libcdr::CDRParser::readLoda(librevenge::RVNGInputStream *input, unsigned le
     }
     else if (argTypes[i] == 0x4aba)
       readPageSize(input);
+    else if (argTypes[i] == 0x1f45 && m_version >= 1600)
+    {
+      // a PowerClip (CorelDRAW X6+): the id of its contents, a group in the clpt list
+      unsigned clipId = readU32(input);
+      if (clipId)
+        m_collector->collectPowerClip(clipId);
+    }
     else if (argTypes[i] == 0x9c72 && m_layerIdPending)
     {
       // the layer's id (CorelDRAW X6+, 16 bytes): a page lists the master layers it shows, in its

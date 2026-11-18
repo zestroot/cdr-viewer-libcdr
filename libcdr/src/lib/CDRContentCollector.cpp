@@ -41,9 +41,33 @@ namespace libcdr
 namespace
 {
 
-// The most output elements drawn again (master layers repeated on each page): a crafted file
-// could otherwise repeat a big layer on thousands of pages
-const unsigned long MAX_COPIED_ELEMENTS = 300000;
+// The most drawing elements drawn again (master layers repeated on each page, PowerClip contents
+// in their containers): a crafted file could otherwise repeat a big layer on thousands of pages,
+// or nest PowerClips that each show the one before twice
+const unsigned long MAX_COPIED_ELEMENTS = 1000000;
+
+unsigned long elementCount(const std::vector<libcdr::CDROutputElementList> &lists)
+{
+  unsigned long count = 0;
+  for (const auto &list : lists)
+    count += list.size();
+  return count;
+}
+
+// Drawing placed in one page's frame (its origin and height), shown on a page with another (a
+// master layer, or a PowerClip's contents read before the pages): its shift there, in inches. The
+// pages of a CorelDRAW X6+ document can each have their own size, their origin in the middle.
+// Given as libcdr's own libcdr:translate-x / -y on a group: the drawing in it is moved by them.
+bool frameShift(const libcdr::CDRPage &from, const libcdr::CDRPage &to, librevenge::RVNGPropertyList &groupProps)
+{
+  const double dx = from.offsetX - to.offsetX;
+  const double dy = (to.height + to.offsetY) - (from.height + from.offsetY);
+  if (CDR_ALMOST_ZERO(dx) && CDR_ALMOST_ZERO(dy))
+    return false;
+  groupProps.insert("libcdr:translate-x", dx);
+  groupProps.insert("libcdr:translate-y", dy);
+  return true;
+}
 
 // An arrowhead's outline as SVG path data in its own units, as its arrw record gives it (libcdr's
 // own libcdr:marker-start / -end: draw:marker-*-path is transformed for ODF's drawing of markers)
@@ -204,6 +228,7 @@ libcdr::CDRContentCollector::CDRContentCollector(libcdr::CDRParserState &ps, lib
     m_groupLevels(), m_groupTransforms(), m_writtenStartMarker(), m_writtenEndMarker(), m_markerPaths(), m_splineData(), m_fillOpacity(1.0), m_reverseOrder(reverseOrder),
     m_masterLayers(), m_masterLayerOrder(), m_masterLayerId(), m_masterOutputElementsStack(),
     m_masterOutputElementsQueue(), m_pageHasMasterLayers(false), m_copiedElements(0),
+    m_masterLayerFrames(), m_clipContents(), m_isInClipList(false), m_clipId(0), m_currentPowerClip(0),
     m_ps(ps)
 {
   m_outputElementsStack = &m_contentOutputElementsStack;
@@ -274,11 +299,18 @@ void libcdr::CDRContentCollector::_endPage()
     for (auto it = m_masterLayerOrder.rbegin(); it != m_masterLayerOrder.rend(); ++it)
     {
       const std::vector<CDROutputElementList> &elements = m_masterLayers[*it];
-      if (m_copiedElements + elements.size() > MAX_COPIED_ELEMENTS)
+      const unsigned long count = elementCount(elements);
+      if (m_copiedElements + count > MAX_COPIED_ELEMENTS)
         break;
-      m_copiedElements += elements.size();
+      m_copiedElements += count;
+      librevenge::RVNGPropertyList groupProps;   // (on a page of another size than the master's)
+      const bool shift = frameShift(m_masterLayerFrames[*it], m_page, groupProps);
+      if (shift && m_painter)
+        m_painter->startLayer(groupProps);
       for (const auto &element : elements)
         element.draw(m_painter);
+      if (shift && m_painter)
+        m_painter->endLayer();
     }
   }
   if (m_painter)
@@ -304,20 +336,37 @@ void libcdr::CDRContentCollector::collectLayer(const std::string &id)
     return;
   m_pageHasMasterLayers = true;
   const std::vector<CDROutputElementList> &elements = iter->second;
-  if (elements.empty() || m_copiedElements + elements.size() > MAX_COPIED_ELEMENTS)
+  const unsigned long count = elementCount(elements);
+  if (elements.empty() || m_copiedElements + count > MAX_COPIED_ELEMENTS)
     return;
-  m_copiedElements += elements.size();
+  m_copiedElements += count;
   if (!m_isPageStarted && !m_ignorePage)
     _startPage(m_page.width, m_page.height);
+  // (in a group moved onto this page, when its size is not the master page's)
+  librevenge::RVNGPropertyList groupProps;
+  CDROutputElementList groupStart, groupEnd;
+  if (frameShift(m_masterLayerFrames[id], m_page, groupProps))
+  {
+    groupStart.addStartGroup(groupProps);
+    groupEnd.addEndGroup();
+  }
   if (m_reverseOrder)   // (the stack is drawn from its top)
   {
+    if (!groupEnd.empty())
+      m_outputElementsStack->push(groupEnd);
     for (auto it = elements.rbegin(); it != elements.rend(); ++it)
       m_outputElementsStack->push(*it);
+    if (!groupStart.empty())
+      m_outputElementsStack->push(groupStart);
   }
   else
   {
+    if (!groupStart.empty())
+      m_outputElementsQueue->push(groupStart);
     for (const auto &element : elements)
       m_outputElementsQueue->push(element);
+    if (!groupEnd.empty())
+      m_outputElementsQueue->push(groupEnd);
   }
 }
 
@@ -328,6 +377,7 @@ void libcdr::CDRContentCollector::collectLayerEnd(unsigned level)
   collectLevel(level + 1);   // (the layer's last object and its groups)
   if (!m_masterLayers.count(m_masterLayerId))
     m_masterLayerOrder.push_back(m_masterLayerId);
+  m_masterLayerFrames[m_masterLayerId] = m_page;
   std::vector<CDROutputElementList> &elements = m_masterLayers[m_masterLayerId];
   elements.clear();   // (in drawing order)
   while (!m_masterOutputElementsStack.empty())
@@ -364,6 +414,7 @@ void libcdr::CDRContentCollector::collectObject(unsigned level)
   m_currentLineStyle = CDRLineStyle();
   m_currentStyleId = 0;
   m_currentBBox = CDRBox();
+  m_currentPowerClip = 0;
 }
 
 void libcdr::CDRContentCollector::collectGroup(unsigned level)
@@ -396,6 +447,26 @@ void libcdr::CDRContentCollector::collectVect(unsigned level)
   m_page.height = 0.0;
   m_page.offsetX = 0.0;
   m_page.offsetY = 0.0;
+}
+
+void libcdr::CDRContentCollector::collectClipList(unsigned level)
+{
+  // read as a vector pattern's drawing is, but kept as drawing elements, placed on the page (the
+  // page's frame is kept): each group is the contents of the PowerClips with its id
+  m_currentVectLevel = level;
+  m_isInClipList = true;
+  m_clipId = 0;
+  while (!m_fillOutputElementsStack.empty())
+    m_fillOutputElementsStack.pop();
+  while (!m_fillOutputElementsQueue.empty())
+    m_fillOutputElementsQueue.pop();
+  m_outputElementsStack = &m_fillOutputElementsStack;
+  m_outputElementsQueue = &m_fillOutputElementsQueue;
+}
+
+void libcdr::CDRContentCollector::collectPowerClip(unsigned id)
+{
+  m_currentPowerClip = id;
 }
 
 void libcdr::CDRContentCollector::collectFlags(unsigned flags, bool considerFlags)
@@ -462,6 +533,24 @@ void libcdr::CDRContentCollector::_flushCurrentPath()
   CDR_DEBUG_MSG(("CDRContentCollector::_flushCurrentPath\n"));
   CDROutputElementList outputElement;
   librevenge::RVNGPropertyListVector imageClip;   // the outline of a bitmap (see below)
+  // a PowerClip (CorelDRAW X6+): its contents, clipped to its outline, over its fill and under its
+  // outline (not for a text; not in a vector pattern's drawing, an SVG without clipping here)
+  const ClipContents *clip = nullptr;
+  unsigned long clipCount = 0;
+  if (m_currentPowerClip && (!m_currentVectLevel || m_isInClipList) && !(m_currentText && !m_currentText->empty()))
+  {
+    auto iter = m_clipContents.find(m_currentPowerClip);
+    if (iter != m_clipContents.end() && !iter->second.elements.empty())
+    {
+      clipCount = elementCount(iter->second.elements);
+      if (m_copiedElements + clipCount <= MAX_COPIED_ELEMENTS)
+        clip = &iter->second;
+    }
+  }
+  m_currentPowerClip = 0;
+  librevenge::RVNGPropertyListVector clipPath;
+  librevenge::RVNGPropertyList clipStrokeStyle;   // the container's outline, drawn after its contents
+  bool clipStroke = false;
   if (!m_currentPath.empty() || (!m_splineData.empty() && m_isInSpline))
   {
     if (m_polygon && m_isInPolygon)
@@ -592,6 +681,19 @@ void libcdr::CDRContentCollector::_flushCurrentPath()
         hasClosed = true;
     if (!hasClosed)
       style.insert("draw:fill", "none");
+    // (an open container clips as if closed, as CorelDRAW does)
+    if (clip && !tmpPath.empty())
+    {
+      clipStroke = style["draw:stroke"] && style["draw:stroke"]->getStr() != "none";
+      if (clipStroke)
+      {
+        clipStrokeStyle = style;
+        clipStrokeStyle.insert("draw:fill", "none");
+        style.insert("draw:stroke", "none");
+      }
+    }
+    else
+      clip = nullptr;
     outputElement.addStyle(style);
     if (!tmpPath.empty())
     {
@@ -601,12 +703,16 @@ void libcdr::CDRContentCollector::_flushCurrentPath()
         outputPath.append(std::move(node));
       if (m_currentImage.getImage().size() && hasClosed)
         imageClip = outputPath;
+      if (clip)
+        clipPath = outputPath;
       librevenge::RVNGPropertyList propList;
       propList.insert("svg:d", std::move(outputPath));
       outputElement.addPath(std::move(propList));
     }
     m_currentPath.clear();
   }
+  else
+    clip = nullptr;
 
   if (m_currentImage.getImage().size())
   {
@@ -909,6 +1015,27 @@ void libcdr::CDRContentCollector::_flushCurrentPath()
     }
     outputElement.addEndTextObject();
   }
+  if (clip)
+  {
+    // (libcdr's own: a group shown only inside this path, in page coordinates, its drawing moved
+    // from the frame it was placed in)
+    m_copiedElements += clipCount;
+    librevenge::RVNGPropertyList groupProps;
+    groupProps.insert("svg:fill-rule", "evenodd");
+    groupProps.insert("libcdr:clip-path", clipPath);
+    frameShift(clip->frame, m_page, groupProps);
+    outputElement.addStartGroup(groupProps);
+    for (const auto &element : clip->elements)
+      outputElement.append(element);
+    outputElement.addEndGroup();
+    if (clipStroke)
+    {
+      outputElement.addStyle(clipStrokeStyle);
+      librevenge::RVNGPropertyList propList;
+      propList.insert("svg:d", std::move(clipPath));
+      outputElement.addPath(std::move(propList));
+    }
+  }
   m_currentImage = libcdr::CDRImage();
   m_currentImageMono = false;
   if (!outputElement.empty())
@@ -963,7 +1090,25 @@ void libcdr::CDRContentCollector::collectLevel(unsigned level)
     m_groupLevels.pop();
     m_groupTransforms.pop();
   }
-  if (m_currentVectLevel && m_spnd && m_groupLevels.empty() && (!m_fillOutputElementsStack.empty() || !m_fillOutputElementsQueue.empty()))
+  if (m_isInClipList && m_clipId && m_groupLevels.empty() && !m_currentObjectLevel)
+  {
+    // a PowerClip's contents, read: kept in drawing order with the page frame they were placed in
+    ClipContents &contents = m_clipContents[m_clipId];
+    contents.elements.clear();
+    while (!m_fillOutputElementsStack.empty())
+    {
+      contents.elements.push_back(m_fillOutputElementsStack.top());
+      m_fillOutputElementsStack.pop();
+    }
+    while (!m_fillOutputElementsQueue.empty())
+    {
+      contents.elements.push_back(m_fillOutputElementsQueue.front());
+      m_fillOutputElementsQueue.pop();
+    }
+    contents.frame = m_page;
+    m_clipId = 0;
+  }
+  if (m_currentVectLevel && !m_isInClipList && m_spnd && m_groupLevels.empty() && (!m_fillOutputElementsStack.empty() || !m_fillOutputElementsQueue.empty()))
   {
     librevenge::RVNGStringVector svgOutput;
     librevenge::RVNGSVGDrawingGenerator generator(svgOutput, "");
@@ -1013,6 +1158,8 @@ void libcdr::CDRContentCollector::collectLevel(unsigned level)
   if (level <= m_currentVectLevel)
   {
     m_currentVectLevel = 0;
+    m_isInClipList = false;
+    m_clipId = 0;
     m_outputElementsStack = &m_contentOutputElementsStack;
     m_outputElementsQueue = &m_contentOutputElementsQueue;
     m_page = m_ps.m_pages[m_pageIndex ? m_pageIndex-1 : 0];
@@ -1737,7 +1884,14 @@ void libcdr::CDRContentCollector::collectBBox(double x0, double y0, double x1, d
 
 void libcdr::CDRContentCollector::collectSpnd(unsigned spnd)
 {
-  if (m_currentVectLevel && !m_spnd)
+  if (m_isInClipList)
+  {
+    // the first: the PowerClip contents' id; the objects' own after it (their texts)
+    if (!m_clipId)
+      m_clipId = spnd;
+    m_spnd = spnd;
+  }
+  else if (m_currentVectLevel && !m_spnd)
     m_spnd = spnd;
   else if (!m_currentVectLevel)
     m_spnd = spnd;

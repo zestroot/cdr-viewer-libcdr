@@ -74,6 +74,8 @@ public:
   void collectStyleId(unsigned styleId) override;
   void collectLayer(const std::string &id) override;
   void collectLayerEnd(unsigned level) override;
+  void collectClipList(unsigned level) override;
+  void collectPowerClip(unsigned id) override;
 
 private:
   CDRContentCollector(const CDRContentCollector &);
@@ -159,8 +161,24 @@ private:
   std::stack<CDROutputElementList> m_masterOutputElementsStack;
   std::queue<CDROutputElementList> m_masterOutputElementsQueue;
   bool m_pageHasMasterLayers;   // the page listed master layers
-  // output elements drawn again (master layers on each page): capped against crafted files
+  // drawing elements drawn again (master layers on each page, PowerClip contents): capped against
+  // crafted files
   unsigned long m_copiedElements;
+  // the master page's frame, each master layer was placed in (a page can have another size)
+  std::map<std::string, CDRPage> m_masterLayerFrames;
+
+  // PowerClips (CorelDRAW X6+): each one's contents in drawing order, by id, with the page frame
+  // they were placed in (the clpt list comes before the pages)
+  struct ClipContents
+  {
+    std::vector<CDROutputElementList> elements;
+    CDRPage frame;
+    ClipContents() : elements(), frame() {}
+  };
+  std::map<unsigned, ClipContents> m_clipContents;
+  bool m_isInClipList;
+  unsigned m_clipId;   // the contents being read
+  unsigned m_currentPowerClip;   // the current object's contents (it is a PowerClip), by id
 
   CDRParserState &m_ps;
 };

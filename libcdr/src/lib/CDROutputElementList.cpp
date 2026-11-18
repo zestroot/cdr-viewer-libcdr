@@ -423,6 +423,11 @@ void CDROutputElementList::addEndGroup()
   m_elements.push_back(std::make_shared<CDREndLayerOutputElement>());
 }
 
+void CDROutputElementList::append(const CDROutputElementList &other)
+{
+  m_elements.insert(m_elements.end(), other.m_elements.begin(), other.m_elements.end());
+}
+
 } // namespace libcdr
 
 /* vim:set shiftwidth=2 softtabstop=2 expandtab: */
