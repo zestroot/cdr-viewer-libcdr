@@ -1963,7 +1963,7 @@ void libcdr::CDRParser::readLoda(librevenge::RVNGInputStream *input, unsigned le
     else if (argTypes[i] == 0x2af8)
       readPolygonTransform(input);
     else if (argTypes[i] == 0x1f40)
-      readOpacity(input, length);
+      readOpacity(input, length > argOffsets[i] ? length - argOffsets[i] : 0);
     else if (argTypes[i] == 0x64)
     {
       if (m_version < 400)
@@ -2162,14 +2162,36 @@ void libcdr::CDRParser::readBmp(librevenge::RVNGInputStream *input, unsigned len
   m_collector->collectBmp(imageId, colorModel, width, height, bpp, palette, bitmap);
 }
 
-void libcdr::CDRParser::readOpacity(librevenge::RVNGInputStream *input, unsigned /* length */)
+void libcdr::CDRParser::readOpacity(librevenge::RVNGInputStream *input, unsigned length)
 {
   if (m_version < 1300)
+  {
     input->seek(10, librevenge::RVNG_SEEK_CUR);
-  else
-    input->seek(14, librevenge::RVNG_SEEK_CUR);
-  double opacity = (double)readU16(input) / 1000.0;
-  m_collector->collectFillOpacity(opacity);
+    double opacity = (double)readU16(input) / 1000.0;
+    m_collector->collectFillOpacity(opacity);
+    return;
+  }
+  // CorelDRAW X3+: u32 0x514 opens the record, the u8 at 8 is the effect (5: transparency; others,
+  // such as lenses, set no opacity), the u16 at 45 its kind (0: uniform; others are fountains and
+  // patterns) and the doubles at 69 and 77 its start and end amounts, in percent. A fountain
+  // transparency is drawn evenly at the mean of its two amounts.
+  if (length < 85)
+    return;
+  const long start = input->tell();
+  if (readU32(input) != 0x514)
+    return;
+  input->seek(start + 8, librevenge::RVNG_SEEK_SET);
+  if (readU8(input) != 5)
+    return;
+  input->seek(start + 45, librevenge::RVNG_SEEK_SET);
+  const unsigned kind = readU16(input);
+  input->seek(start + 69, librevenge::RVNG_SEEK_SET);
+  const double startAmount = readDouble(input);
+  const double endAmount = readDouble(input);
+  const double amount = kind ? (startAmount + endAmount) / 2.0 : startAmount;
+  if (!(amount >= 0.0 && amount <= 100.0))   // (also NaN)
+    return;
+  m_collector->collectFillOpacity(1.0 - amount / 100.0);
 }
 
 void libcdr::CDRParser::readBmpf(librevenge::RVNGInputStream *input, unsigned length)
